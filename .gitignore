@@ -1,0 +1,81 @@
+# ------------------------
+# Python / FastAPI project
+# ------------------------
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Python cache / build
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+build/
+dist/
+.eggs/
+
+# Local environment files
+.env
+.env.*
+!.env.example  # 예시 파일은 포함
+!.env.sample
+
+# IDE / Editor settings
+.vscode/
+.idea/
+*.iml
+
+# Logs / temp / artifacts
+logs/
+*.log
+artifacts/
+tmp/
+temp/
+*.tmp
+
+# OS-specific files
+.DS_Store
+Thumbs.db
+
+# Test outputs / coverage
+.coverage
+htmlcov/
+.pytest_cache/
+.tox/
+.mypy_cache/
+.cache/
+
+# Jupyter / notebooks
+.ipynb_checkpoints
+*.ipynb
+
+# Data files (로컬 샘플/결과물)
+*.csv
+*.xlsx
+*.json
+!sample_credit_data.csv   # 샘플 데이터는 유지
+
+# Scripts outputs
+scripts/__pycache__/
+scripts/*.out
+scripts/*.bak
+
+# Package manager lockfiles (선택)
+Pipfile.lock
+poetry.lock
+requirements-dev.txt
+
+# Docker / container
+docker-compose.override.yml
+*.pid
+
+# OS temporary
+*.swp
+*.swo
+*.orig
+
