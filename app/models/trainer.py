@@ -25,32 +25,44 @@ def train_pipeline(
     learning_rate: float = 0.03,
     n_estimators: int = 3000,
     num_leaves: int = 63,
-    calibrator: str = "isotonic",     # 'isotonic' | 'sigmoid' | 'none'
-    reg_lambda: float = 10.0,         # 약간 강한 정규화로 과출력 완화
+    calibrator: str = "none",        # 'isotonic' | 'sigmoid' | 'none'
+    reg_lambda: float = 10.0,        # 약간 강한 정규화로 과출력 완화
     reg_alpha: float = 1.0,
     min_data_in_leaf: int = 50,
     min_sum_hessian_in_leaf: float = 5.0,
 ) -> Dict[str, Any]:
+
+    print("\n================= [TRAIN START] =================")
+    print(f"[CONFIG] target='{target}', test_size={test_size}, random_state={random_state}")
+    print(f"[CONFIG] feature_select_threshold='{feature_select_threshold}', calibrator='{calibrator}'")
+    print(f"[CONFIG] params: lr={learning_rate}, n_estimators={n_estimators}, num_leaves={num_leaves}, "
+          f"lambda={reg_lambda}, alpha={reg_alpha}, min_data_in_leaf={min_data_in_leaf}, "
+          f"min_sum_hessian_in_leaf={min_sum_hessian_in_leaf}")
+
     if target not in df.columns:
         raise ValueError(f"Target column '{target}' not found")
 
+    print(f"[DATA] df shape={df.shape}, columns={list(df.columns)}")
     y = df[target].astype(int)
     X = df.drop(columns=[target])
     base_rate = float(y.mean())
+    print(f"[DATA] base_rate(positive ratio)={base_rate:.6f}")
 
     # ---------- 1) 세 분할: Train / Calib / Valid ----------
-    # 먼저 Train vs Temp
     X_train, X_temp, y_train, y_temp = train_test_split(
         X, y, test_size=test_size, stratify=y, random_state=random_state
     )
-    # Temp을 다시 Calib/Valid로 50:50
     X_calib, X_valid, y_calib, y_valid = train_test_split(
         X_temp, y_temp, test_size=0.5, stratify=y_temp, random_state=random_state
     )
+    print(f"[SPLIT] train={len(y_train)}, calib={len(y_calib)}, valid={len(y_valid)} "
+          f"(total={len(y)})")
 
     # ---------- 2) 인코더 ----------
     cat_cols = X.select_dtypes(include=["object", "category"]).columns.tolist()
     num_cols = X.select_dtypes(exclude=["object", "category"]).columns.tolist()
+    print(f"[COLS] num_cols({len(num_cols)}): {num_cols}")
+    print(f"[COLS] cat_cols({len(cat_cols)}): {cat_cols}")
 
     encoder = ColumnTransformer(
         transformers=[
@@ -64,8 +76,12 @@ def train_pipeline(
     X_train_enc = encoder.fit_transform(X_train)
     X_calib_enc = encoder.transform(X_calib)
     X_valid_enc = encoder.transform(X_valid)
-
     enc_feature_names = num_cols + cat_cols
+
+    print(f"[ENC] X_train_enc shape={getattr(X_train_enc,'shape',None)}, "
+          f"X_calib_enc shape={getattr(X_calib_enc,'shape',None)}, "
+          f"X_valid_enc shape={getattr(X_valid_enc,'shape',None)}")
+    print(f"[ENC] enc_feature_names({len(enc_feature_names)}) ok")
 
     # ---------- 3) 1차 모델 ----------
     base = LGBMClassifier(
@@ -83,18 +99,26 @@ def train_pipeline(
         metric="auc",
     )
 
+    print("[FIT:BASE] fitting base model with early_stopping on VALID...")
     base.fit(
         X_train_enc, y_train,
-        eval_set=[(X_valid_enc, y_valid)],   # 얼리스탑은 Valid만 참조
-        callbacks=[
-            early_stopping(stopping_rounds=200),
-            log_evaluation(period=0),
-        ],
+        eval_set=[(X_valid_enc, y_valid)],
+        callbacks=[early_stopping(stopping_rounds=200), log_evaluation(period=0)],
     )
-
     auc_all = roc_auc_score(y_valid, base.predict_proba(X_valid_enc)[:, 1])
+    print(f"[METRIC:BASE] AUC(all features)={auc_all:.6f}")
+
+    # importance 상위 10개 출력(참고)
+    try:
+        imp = base.feature_importances_
+        idx_top10 = np.argsort(-imp)[:10]
+        top10 = [(enc_feature_names[i], int(imp[i])) for i in idx_top10]
+        print(f"[IMP:BASE] top10={top10}")
+    except Exception as e:
+        print(f"[IMP:BASE] importance print failed: {e}")
 
     # ---------- 4) 특성 선택 ----------
+    print(f"[SEL] SelectFromModel threshold='{feature_select_threshold}'")
     selector = SelectFromModel(estimator=base, threshold=feature_select_threshold, prefit=True)
     X_train_sel = selector.transform(X_train_enc)
     X_calib_sel = selector.transform(X_calib_enc)
@@ -102,9 +126,11 @@ def train_pipeline(
 
     selected_mask = selector.get_support()
     selected_features = [f for f, keep in zip(enc_feature_names, selected_mask) if keep]
+    print(f"[SEL] selected_features({len(selected_features)}): {selected_features}")
+    print(f"[SEL] shapes → train={X_train_sel.shape}, calib={X_calib_sel.shape}, valid={X_valid_sel.shape}")
 
-    # 피처가 0개로 떨어지는 극단 방어
     if X_train_sel.shape[1] == 0:
+        print("[WARN] No features selected! Fallback to all encoded features.")
         X_train_sel, X_calib_sel, X_valid_sel = X_train_enc, X_calib_enc, X_valid_enc
         selected_features = enc_feature_names
 
@@ -124,21 +150,19 @@ def train_pipeline(
         metric="auc",
     )
 
+    print("[FIT:FINAL] fitting final tree on selected features...")
     final.fit(
         X_train_sel, y_train,
-        eval_set=[(X_valid_sel, y_valid)],   # 얼리스탑은 계속 Valid
-        callbacks=[
-            early_stopping(stopping_rounds=200),
-            log_evaluation(period=0),
-        ],
+        eval_set=[(X_valid_sel, y_valid)],
+        callbacks=[early_stopping(stopping_rounds=200), log_evaluation(period=0)],
     )
 
     # ---------- 6) 캘리브레이션 ----------
+    print(f"[CALIB] calibrator='{calibrator}' (cv='prefit' on CALIB split)")
     if calibrator == "none":
         calib = None
         pd_valid = final.predict_proba(X_valid_sel)[:, 1]
     elif calibrator == "isotonic":
-        # Holdout Calib만 사용 (과적합/절벽화 방지)
         calib = CalibratedClassifierCV(final, method="isotonic", cv="prefit")
         calib.fit(X_calib_sel, y_calib)
         pd_valid = calib.predict_proba(X_valid_sel)[:, 1]
@@ -151,14 +175,20 @@ def train_pipeline(
 
     auc_sel = roc_auc_score(y_valid, pd_valid)
     brier = brier_score_loss(y_valid, pd_valid)
+    print(f"[METRIC:FINAL] AUC(selected)={auc_sel:.6f}, Brier={brier:.6f}")
+    try:
+        print(f"[CHECK] pd_valid stats → min={pd_valid.min():.6f}, max={pd_valid.max():.6f}, "
+              f"mean={pd_valid.mean():.6f}, std={pd_valid.std():.6f}")
+    except Exception:
+        pass
 
     # ---------- 7) 저장 ----------
     version = time.strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:6]
     save_dir = os.path.join(ARTIFACTS_DIR, version)
     os.makedirs(save_dir, exist_ok=True)
 
-    # 원 트리 모델도 별도 저장(원 확률/SHAP 비교용)
     dump(final, os.path.join(save_dir, "tree_model.joblib"))
+    print(f"[SAVE] tree_model.joblib saved → {os.path.join(save_dir, 'tree_model.joblib')}")
 
     meta = {
         "version": version,
@@ -192,9 +222,11 @@ def train_pipeline(
         },
     }
 
-    # 캘리브레이터가 있으면 그걸 저장, 없으면 최종 트리 저장(후방 호환)
     model_to_save = calib if calibrator != "none" else final
     save_artifacts(save_dir, encoder, selector, model_to_save, meta)
+    print(f"[SAVE] artifacts saved under → {save_dir}")
+    print(f"[SAVE] meta.json includes selected_features({len(selected_features)}) & metrics")
+    print("================= [TRAIN END] =================\n")
 
     return {
         "message": "trained",
